@@ -55,6 +55,14 @@ pipeline {
         }
 
     }
+    stage('Manual Approval') {
+    steps {
+
+        input message: "Deploy version ${params.APP_VERSION} to ${params.DEPLOY_ENV}?",
+              ok: "Approve Deployment"
+
+    }
+}
 
     post {
 
