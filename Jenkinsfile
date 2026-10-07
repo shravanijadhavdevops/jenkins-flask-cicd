@@ -19,7 +19,7 @@ pipeline {
 
     environment {
         APP_NAME = 'jenkins-flask-cicd'
-        APP_PORT = '5000'
+        APP_PORT = '5001'
     }
 
     stages {
@@ -63,6 +63,19 @@ pipeline {
             }
         }
 
+        stage('Test SSH Connection') {
+            steps {
+
+                sshagent(['ec2-target-key']) {
+
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no \
+                            ec2-user@54.208.147.23 \
+                            "echo SSH connection successful"
+                    '''
+                }
+            }
+        }
     }
 
     post {
