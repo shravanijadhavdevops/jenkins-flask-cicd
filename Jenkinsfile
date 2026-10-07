@@ -1,199 +1,232 @@
 pipeline {
 
-    agent any
+agent any
 
-    parameters {
+parameters {
 
-        choice(
-            name: 'DEPLOY_ENV',
-            choices: ['staging', 'production'],
-            description: 'Select deployment environment'
-        )
+    choice(
+        name: 'DEPLOY_ENV',
+        choices: ['staging', 'production'],
+        description: 'Select deployment environment'
+    )
 
-        string(
-            name: 'APP_VERSION',
-            defaultValue: '1.0',
-            description: 'Enter application version'
-        )
+    string(
+        name: 'APP_VERSION',
+        defaultValue: '1.0',
+        description: 'Enter application version'
+    )
+}
+
+environment {
+
+    APP_NAME = 'jenkins-flask-cicd'
+    APP_PORT = '5001'
+    SERVER_IP = '54.208.147.23'
+    DEPLOY_DIR = '/home/ec2-user/jenkins-flask-app'
+}
+
+stages {
+
+    stage('Build') {
+
+        steps {
+
+            echo "Building ${APP_NAME} version ${params.APP_VERSION}"
+
+            sh """
+                tar -czf flask-app-${params.APP_VERSION}.tar.gz \
+                app.py \
+                requirements.txt \
+                templates
+            """
+
+            echo 'Build completed successfully.'
+        }
     }
 
-    environment {
 
-        APP_NAME = 'jenkins-flask-cicd'
-        APP_PORT = '5001'
-        SERVER_IP = '54.208.147.23'
-        DEPLOY_DIR = '/home/ec2-user/jenkins-flask-app'
+    stage('Test') {
+
+        steps {
+
+            echo 'Testing Flask application...'
+
+            sh '''
+                python3 -m venv venv
+
+                . venv/bin/activate
+
+                pip install -r requirements.txt
+
+                python3 -c "from app import app; print('Flask application test passed')"
+            '''
+        }
     }
 
-    stages {
 
-        stage('Build') {
+    stage('Manual Approval') {
 
-            steps {
+        steps {
 
-                echo "Building ${APP_NAME} version ${params.APP_VERSION}"
+            input(
+                message: "Deploy version ${params.APP_VERSION} to ${params.DEPLOY_ENV}?",
+                ok: "Approve Deployment"
+            )
+        }
+    }
+
+
+    stage('Deploy') {
+
+        steps {
+
+            echo "Deploying ${APP_NAME} version ${params.APP_VERSION}"
+
+            sshagent(['ec2-target-key']) {
 
                 sh """
-                    tar -czf flask-app-${params.APP_VERSION}.tar.gz \
-                        app.py \
-                        requirements.txt \
-                        templates
-                """
+                    echo "Uploading application package..."
 
-                echo 'Build completed successfully.'
-            }
-        }
+                    scp -o StrictHostKeyChecking=no \
+                    flask-app-${params.APP_VERSION}.tar.gz \
+                    ec2-user@${SERVER_IP}:${DEPLOY_DIR}/
 
 
-        stage('Test') {
+                    echo "Connecting to target EC2..."
 
-            steps {
+                    ssh -o StrictHostKeyChecking=no \
+                    ec2-user@${SERVER_IP} '
+                    
+                    set -e
 
-                echo "Testing Flask application..."
+                    cd ${DEPLOY_DIR}
 
-                sh '''
+                    echo "Extracting application..."
+
+                    tar -xzf flask-app-${params.APP_VERSION}.tar.gz
+
+
+                    echo "Creating virtual environment..."
+
                     python3 -m venv venv
+
+
+                    echo "Installing dependencies..."
 
                     . venv/bin/activate
 
                     pip install -r requirements.txt
 
-                    python3 -c "from app import app; print('Flask application test passed')"
-                '''
-            }
-        }
+
+                    echo "Stopping previous Gunicorn process..."
+
+                    if [ -f gunicorn.pid ]; then
+
+                        OLD_PID=$(cat gunicorn.pid)
+
+                        if kill -0 $OLD_PID 2>/dev/null; then
+                            kill $OLD_PID
+                            sleep 2
+                        fi
+
+                        rm -f gunicorn.pid
+
+                    fi
 
 
-        stage('Manual Approval') {
+                    echo "Starting Gunicorn..."
 
-            steps {
-
-                input message: "Deploy version ${params.APP_VERSION} to ${params.DEPLOY_ENV}?",
-                      ok: "Approve Deployment"
-            }
-        }
-
-
-        stage('Deploy') {
-
-            steps {
-
-                echo "Deploying ${APP_NAME} version ${params.APP_VERSION}..."
-
-                sshagent(['ec2-target-key']) {
-
-                    sh """
-                        echo "Uploading application package..."
-
-                        scp -o StrictHostKeyChecking=no \
-                            flask-app-${params.APP_VERSION}.tar.gz \
-                            ec2-user@${SERVER_IP}:${DEPLOY_DIR}/
+                    nohup ./venv/bin/gunicorn \
+                    --bind 0.0.0.0:${APP_PORT} \
+                    --workers 2 \
+                    app:app \
+                    > gunicorn.log 2>&1 &
 
 
-                        echo "Connecting to target EC2..."
+                    NEW_PID=$!
 
-                        ssh -o StrictHostKeyChecking=no \
-                            ec2-user@${SERVER_IP} '
-                            
-                            set -e
-
-                            cd ${DEPLOY_DIR}
+                    echo $NEW_PID > gunicorn.pid
 
 
-                            echo "Extracting application..."
-
-                            tar -xzf flask-app-${params.APP_VERSION}.tar.gz
+                    sleep 3
 
 
-                            echo "Creating virtual environment..."
+                    echo "Checking application process..."
 
-                            python3 -m venv venv
+                    if kill -0 $NEW_PID 2>/dev/null; then
 
+                        echo "Application deployed successfully"
+                        echo "Gunicorn PID: $NEW_PID"
+                        echo "Application Port: ${APP_PORT}"
 
-                            echo "Installing application dependencies..."
+                    else
 
-                            . venv/bin/activate
+                        echo "Application failed to start"
 
-                            pip install -r requirements.txt
+                        echo "========== Gunicorn Log =========="
 
+                        cat gunicorn.log
 
-                            echo "Stopping previous application..."
+                        echo "=================================="
 
-                            if [ -f gunicorn.pid ]; then
+                        exit 1
 
-                                kill \$(cat gunicorn.pid) || true
+                    fi
 
-                                rm -f gunicorn.pid
-
-                            fi
-
-
-                            echo "Starting Gunicorn..."
-
-                            nohup ./venv/bin/gunicorn \
-                                --bind 0.0.0.0:${APP_PORT} \
-                                --workers 2 \
-                                app:app \
-                                > gunicorn.log 2>&1 &
-
-
-                            echo \$! > gunicorn.pid
-
-
-                            sleep 3
-
-
-                            echo "Checking Gunicorn process..."
-
-                            if kill -0 \$(cat gunicorn.pid) 2>/dev/null; then
-
-                                echo "Application deployed successfully"
-
-                            else
-
-                                echo "Application failed to start"
-
-                                echo "========== Gunicorn Log =========="
-
-                                cat gunicorn.log
-
-                                echo "==================================="
-
-                                exit 1
-
-                            fi
-
-                        '
-                    """
-                }
-            }
-        }
-
-
-        stage('Health Check') {
-
-            steps {
-
-                echo "Checking application health..."
-
-                sshagent(['ec2-target-key']) {
-
-                    sh """
-                        ssh -o StrictHostKeyChecking=no \
-                            ec2-user@${SERVER_IP} \
-                            "curl -f http://127.0.0.1:${APP_PORT}/health"
-                    """
-                }
-
-                echo "Health check passed successfully."
+                    '
+                """
             }
         }
     }
 
 
-    post {
+    stage('Health Check') {
 
-        success {
+        steps {
 
-            archiveArtifacts artifacts: 'flask-app-*.tar.gz',
-```
+            echo "Checking application health..."
+
+            sshagent(['ec2-target-key']) {
+
+                sh """
+                    ssh -o StrictHostKeyChecking=no \
+                    ec2-user@${SERVER_IP} \
+                    "curl -f http://127.0.0.1:${APP_PORT}/health"
+                """
+            }
+
+            echo 'Health check passed successfully.'
+        }
+    }
+}
+
+
+post {
+
+    success {
+
+        archiveArtifacts(
+            artifacts: 'flask-app-*.tar.gz',
+            fingerprint: true
+        )
+
+        echo '======================================'
+        echo '       DEPLOYMENT SUCCESSFUL'
+        echo '======================================'
+        echo "Application : ${APP_NAME}"
+        echo "Version     : ${params.APP_VERSION}"
+        echo "Environment : ${params.DEPLOY_ENV}"
+        echo "Port        : ${APP_PORT}"
+        echo '======================================'
+    }
+
+
+    failure {
+
+        echo '======================================'
+        echo '          PIPELINE FAILED'
+        echo '======================================'
+        echo 'Check the failed stage above.'
+        echo '======================================'
+    }
+}
